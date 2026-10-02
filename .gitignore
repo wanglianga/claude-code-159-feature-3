@@ -26,10 +26,19 @@ temp/
 *.log
 *.sqlite
 *.db
-*screenshot*
-*screen-capture*
-*recording*
-*trace*
-*debug*
-*temp*
-*tmp*
+
+# 登记页文件名含 “temP”，会被上面的 *temp* 误伤，显式保留
+!src/pages/RegisterItemPage.vue
+.local/*.tar
+.local/*.tar.gz
+.local/*.tgz
+.local/*.zip
+.local/*.7z
+*screenshot*.png
+*screenshot*.jpg
+*screenshot*.jpeg
+*screen-capture*.png
+*screen-capture*.jpg
+*recording*.webm
+*recording*.mp4
+*trace*.jsonl

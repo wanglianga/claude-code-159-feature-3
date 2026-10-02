@@ -2,6 +2,7 @@ import type {
   Category,
   FeedbackType,
   HandoverMethod,
+  Item,
   ItemDraft,
   ItemStatus,
   RequestStatus,
@@ -89,6 +90,80 @@ export const CLOSE_MODE_LABELS = {
   mutual_aid: '邻里赠予，无需归还',
 } as const
 
+// ---- 不适反馈：使用方式 / 过敏史 / 症状 选项 ----
+export const USAGE_METHOD_OPTIONS = [
+  '直接涂抹伤口及周围皮肤',
+  '用碘伏棉片湿敷/擦拭',
+  '用碘伏棉签点涂消毒',
+  '擦拭完整皮肤（未接触伤口）',
+  '其他方式（在情况描述中说明）',
+] as const
+
+export const ALLERGY_HISTORY_OPTIONS = [
+  '无已知药物/消毒剂过敏史',
+  '既往对碘伏或含碘消毒剂过敏',
+  '对其他外用药/胶布等过敏（具体写在描述里）',
+  '不清楚，没有留意过',
+] as const
+
+export const SYMPTOM_OPTIONS = ['接触部位皮肤发红', '局部肿胀', '瘙痒/灼热感', '皮疹/水疱', '呼吸不畅或其他全身反应'] as const
+
+// ---- 批次 ----
+/** 批次定位键：同品类 + 同生产批号（无批号物品不参与自动连带冻结） */
+export function batchKey(category: Category, batchNo?: string): string {
+  return `${category}::${(batchNo ?? '').trim() || 'NO_BATCH'}`
+}
+
+export function batchLabel(category: Category, batchNo?: string): string {
+  return `${CATEGORY_LABELS[category]} · 批号 ${batchNo && batchNo.trim() ? batchNo : '未标注'}`
+}
+
+/**
+ * 安全替代物：某品类因不适反馈核查时，向居民推荐的其他在架品类。
+ * 仅推荐物理性、低致敏的护理耗材；药品类一律不出现。
+ */
+export const CATEGORY_ALTERNATIVES: Record<Category, Category[]> = {
+  iodophor: ['gauze', 'bandage'],
+  gauze: ['bandage'],
+  bandage: ['gauze'],
+  fever_patch: ['thermometer_battery'],
+  mask: [],
+  thermometer_battery: [],
+  other_consumable: [],
+}
+
+/** 替代时的非药物处理建议 */
+export const ALTERNATIVE_ADVICE: Partial<Record<Category, string>> = {
+  iodophor: '浅表小伤口可先用清洁流动水冲洗，再用未涉事批次的无菌纱布/创可贴覆盖保护；伤口较深、化脓或出血不止请直接就医。',
+  gauze: '浅表小伤口清洁后可用创可贴保护；如创面较大或渗液较多，请前往社区卫生服务中心处理。',
+  bandage: '清洁伤口后可用无菌纱布简单覆盖；保持干燥并观察，红肿加重请就医。',
+  fever_patch: '可先温水擦浴、减少捂盖进行物理降温；持续高热、精神差请立即就医，共享箱不提供退烧药。',
+}
+
+/** 就医渠道（演示数据，真实环境对接社区卫生服务中心信息） */
+export interface MedicalChannel {
+  name: string
+  desc: string
+  action: string
+}
+export const MEDICAL_CHANNELS: MedicalChannel[] = [
+  {
+    name: '幸福里社区卫生服务中心',
+    desc: '皮肤红肿、瘙痒、伤口感染咨询；工作日 8:00–20:00，周末有值班。',
+    action: '咨询电话 0571-8888-0000（演示号码）',
+  },
+  {
+    name: '120 急救 / 最近三甲医院急诊',
+    desc: '出现呼吸不畅、喉头水肿、全身风团、意识异常等严重过敏表现时立即拨打。',
+    action: '立即拨打 120',
+  },
+  {
+    name: '正规药店 / 医院皮肤科',
+    desc: '就诊或购药时请携带涉事物品包装，向医生出示批号与使用方式。',
+    action: '携带包装与批号前往',
+  },
+]
+
 // ---- 业务规则参数 ----
 /** 效期预警阈值（天） */
 export const EXPIRY_WARN_DAYS = 60
@@ -171,6 +246,9 @@ export function validateDraft(draft: ItemDraft, now: string | Date): DraftValida
   if (draft.category === 'other_consumable') {
     warnings.push('“其他非处方耗材”需要志愿者与社区工作人员双重确认后才能发布。')
   }
+  if (!draft.batchNo?.trim()) {
+    warnings.push('未填写生产批号：一旦出现使用后不适，将无法精确冻结同批次物品，建议按包装标注补填。')
+  }
   if (draft.sceneTags.length === 0) warnings.push('未选择适用场景，将较难被有需要的邻居检索到。')
   return { errors, warnings }
 }
@@ -178,6 +256,14 @@ export function validateDraft(draft: ItemDraft, now: string | Date): DraftValida
 /** 占用库存的申请状态：确认后即锁定，直到取消或闭环（归还/补充/赠予）才释放 */
 export const STOCK_LOCKING_STATUSES: RequestStatus[] = ['confirmed', 'handing', 'completed']
 
+/** 仍可能流向居民手中、需要安全通知的借用状态 */
+export const BORROWER_NOTIFY_STATUSES: RequestStatus[] = ['completed', 'closed_returned']
+
 export function isTerminalItemStatus(status: ItemStatus): boolean {
   return status === 'rejected' || status === 'recalled' || status === 'scrapped'
+}
+
+/** 物品是否处于会被大厅展示/申请的状态 */
+export function isActiveItem(item: Item): boolean {
+  return ['published', 'partially_lent', 'lent_out'].includes(item.status)
 }

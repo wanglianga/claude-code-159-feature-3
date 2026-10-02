@@ -112,7 +112,7 @@ function closeBorrow(id: string) {
       </label>
       <div class="card-actions">
         <button class="btn btn-primary btn-sm" @click="closeBorrow(r.id)">登记归还 / 补充完成</button>
-        <button class="btn btn-sm btn-danger" @click="router.push(`/items/${r.itemId}`)">使用中发现问题？去反馈</button>
+        <button class="btn btn-sm btn-danger" @click="router.push(`/items/${r.itemId}?req=${r.id}`)">使用中发现问题？去反馈</button>
       </div>
     </template>
   </div>

@@ -1,6 +1,16 @@
 // 演示用户：居民 / 志愿者 / 社区工作人员
-import type { BorrowRequest, DemoUser, Feedback, Item, TimelineEvent } from '@/types'
+import type {
+  AppNotification,
+  BorrowRequest,
+  CategoryRiskWarning,
+  DemoUser,
+  Feedback,
+  FrozenBatch,
+  Item,
+  TimelineEvent,
+} from '@/types'
 import { addDays, addHours } from '@/utils/date'
+import { batchKey, batchLabel } from '@/rules'
 
 export type { DemoUser }
 
@@ -21,7 +31,19 @@ export function uid(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${seq}_${Math.random().toString(36).slice(2, 6)}`
 }
 
-function buildSeed(now: string): { items: Item[]; requests: BorrowRequest[]; feedbacks: Feedback[] } {
+/** 碘伏同批次（红肿反馈核查场景的核心批号） */
+export const IODOPHOR_BATCH = 'IOD-20260701'
+
+function buildSeed(now: string): {
+  items: Item[]
+  requests: BorrowRequest[]
+  feedbacks: Feedback[]
+  frozenBatches: FrozenBatch[]
+  riskWarnings: CategoryRiskWarning[]
+  notifications: AppNotification[]
+} {
+  const iodKey = batchKey('iodophor', IODOPHOR_BATCH)
+
   const items: Item[] = [
     {
       id: 'i1',
@@ -30,6 +52,7 @@ function buildSeed(now: string): { items: Item[]; requests: BorrowRequest[]; fee
       name: '医用退热贴',
       category: 'fever_patch',
       spec: '4贴/盒',
+      batchNo: 'FP-20260301',
       expiryDate: addDays(now, 180).slice(0, 10),
       storage: 'cool_dry',
       sealed: true,
@@ -48,6 +71,7 @@ function buildSeed(now: string): { items: Item[]; requests: BorrowRequest[]; fee
       name: '碘伏棉片',
       category: 'iodophor',
       spec: '独立包装 20片/盒',
+      batchNo: IODOPHOR_BATCH,
       expiryDate: addDays(now, 45).slice(0, 10),
       storage: 'room_temp',
       sealed: true,
@@ -55,9 +79,11 @@ function buildSeed(now: string): { items: Item[]; requests: BorrowRequest[]; fee
       location: '5号楼3单元门口便民架',
       sceneTags: ['elderly_wound', 'home_care'],
       note: '效期不足两个月，页面会显著提示，请按需借用。',
-      status: 'published',
+      status: 'quarantined',
       createdAt: addDays(now, -6),
       publishedAt: addDays(now, -6),
+      closeReason: `同批次（批号 ${IODOPHOR_BATCH}）收到借用人使用后皮肤红肿反馈，剩余物品已冻结，待工作人员核查`,
+      frozenBatchKey: iodKey,
     },
     {
       id: 'i4',
@@ -66,6 +92,7 @@ function buildSeed(now: string): { items: Item[]; requests: BorrowRequest[]; fee
       name: '创可贴',
       category: 'bandage',
       spec: '100片/盒',
+      batchNo: 'BA-20260501',
       expiryDate: addDays(now, 300).slice(0, 10),
       storage: 'room_temp',
       sealed: true,
@@ -83,6 +110,7 @@ function buildSeed(now: string): { items: Item[]; requests: BorrowRequest[]; fee
       name: '一次性使用医用口罩',
       category: 'mask',
       spec: '50只/盒（灭菌级）',
+      batchNo: 'MK-20260201',
       expiryDate: addDays(now, 400).slice(0, 10),
       storage: 'room_temp',
       sealed: true,
@@ -100,6 +128,7 @@ function buildSeed(now: string): { items: Item[]; requests: BorrowRequest[]; fee
       name: '体温计纽扣电池',
       category: 'thermometer_battery',
       spec: 'LR41 2粒/板',
+      batchNo: 'BT-LR41-2025',
       expiryDate: addDays(now, 700).slice(0, 10),
       storage: 'room_temp',
       sealed: true,
@@ -118,6 +147,7 @@ function buildSeed(now: string): { items: Item[]; requests: BorrowRequest[]; fee
       name: '儿童退热贴',
       category: 'fever_patch',
       spec: '6贴/盒',
+      batchNo: 'FP-20260410',
       expiryDate: addDays(now, 240).slice(0, 10),
       storage: 'cool_dry',
       sealed: true,
@@ -134,6 +164,7 @@ function buildSeed(now: string): { items: Item[]; requests: BorrowRequest[]; fee
       name: '碘伏消毒液',
       category: 'iodophor',
       spec: '100ml/瓶 带密封盖',
+      batchNo: 'IOD-20251201',
       expiryDate: addDays(now, 20).slice(0, 10),
       storage: 'room_temp',
       sealed: true,
@@ -151,6 +182,7 @@ function buildSeed(now: string): { items: Item[]; requests: BorrowRequest[]; fee
       name: '防水创可贴',
       category: 'bandage',
       spec: '20片/盒',
+      batchNo: 'BA-20260301',
       expiryDate: addDays(now, 200).slice(0, 10),
       storage: 'room_temp',
       sealed: true,
@@ -169,6 +201,7 @@ function buildSeed(now: string): { items: Item[]; requests: BorrowRequest[]; fee
       name: '无菌纱布块',
       category: 'gauze',
       spec: '5片/袋（独立灭菌）',
+      batchNo: 'GA-20260101',
       expiryDate: addDays(now, 12).slice(0, 10),
       storage: 'room_temp',
       sealed: true,
@@ -188,6 +221,7 @@ function buildSeed(now: string): { items: Item[]; requests: BorrowRequest[]; fee
       name: '儿童防护口罩',
       category: 'mask',
       spec: '10只/包',
+      batchNo: 'MK-20251201',
       expiryDate: addDays(now, 300).slice(0, 10),
       storage: 'room_temp',
       sealed: true,
@@ -224,6 +258,7 @@ function buildSeed(now: string): { items: Item[]; requests: BorrowRequest[]; fee
       name: '一次性防护口罩（库存遗留）',
       category: 'mask',
       spec: '20只/盒',
+      batchNo: 'MK-20240101',
       expiryDate: addDays(now, -3).slice(0, 10),
       storage: 'room_temp',
       sealed: true,
@@ -234,6 +269,65 @@ function buildSeed(now: string): { items: Item[]; requests: BorrowRequest[]; fee
       status: 'published',
       createdAt: addDays(now, -200),
       publishedAt: addDays(now, -199),
+    },
+    // —— 同批次第二件碘伏：反馈后应被连带冻结 ——
+    {
+      id: 'i13',
+      ownerId: 'u_a',
+      ownerName: '王秀兰',
+      name: '碘伏棉签',
+      category: 'iodophor',
+      spec: '独立包装 36支/盒',
+      batchNo: IODOPHOR_BATCH,
+      expiryDate: addDays(now, 120).slice(0, 10),
+      storage: 'room_temp',
+      sealed: true,
+      quantity: 3,
+      location: '3号楼1单元一楼“邻里药箱”共享柜 A格',
+      sceneTags: ['elderly_wound', 'home_care'],
+      note: '与 5 号楼周敏共享的碘伏棉片为同一生产批号。',
+      status: 'quarantined',
+      createdAt: addDays(now, -4),
+      publishedAt: addDays(now, -4),
+      closeReason: `与碘伏棉片同批次（批号 ${IODOPHOR_BATCH}），收到皮肤红肿反馈后连带冻结，待核查`,
+      frozenBatchKey: iodKey,
+    },
+    // —— 安全替代物：冻结期间向居民推荐的其他在架耗材 ——
+    {
+      id: 'i14',
+      ownerId: 'u_b',
+      ownerName: '李建国',
+      name: '无菌纱布块',
+      category: 'gauze',
+      spec: '5片/袋（独立灭菌）',
+      batchNo: 'GA-20260801',
+      expiryDate: addDays(now, 260).slice(0, 10),
+      storage: 'room_temp',
+      sealed: true,
+      quantity: 4,
+      location: '2号楼2单元201门口挂袋',
+      sceneTags: ['elderly_wound', 'home_care'],
+      status: 'published',
+      createdAt: addDays(now, -3),
+      publishedAt: addDays(now, -3),
+    },
+    {
+      id: 'i15',
+      ownerId: 'u_a',
+      ownerName: '王秀兰',
+      name: '透气创可贴',
+      category: 'bandage',
+      spec: '50片/盒',
+      batchNo: 'BA-20260801',
+      expiryDate: addDays(now, 280).slice(0, 10),
+      storage: 'room_temp',
+      sealed: true,
+      quantity: 6,
+      location: '3号楼1单元一楼“邻里药箱”共享柜 A格',
+      sceneTags: ['elderly_wound', 'home_care'],
+      status: 'published',
+      createdAt: addDays(now, -2),
+      publishedAt: addDays(now, -2),
     },
   ]
 
@@ -322,8 +416,43 @@ function buildSeed(now: string): { items: Item[]; requests: BorrowRequest[]; fee
       volunteerId: 'u_v',
       volunteerName: '陈芳（志愿者）',
     },
+    // 李建国借走过涉事批次碘伏棉片（红肿反馈人 + 已借用居民，需被通知）
+    {
+      id: 'r6',
+      itemId: 'i2',
+      applicantId: 'u_b',
+      applicantName: '李建国',
+      scene: 'elderly_wound',
+      quantity: 1,
+      method: 'self_pickup',
+      note: '老人小伤口消毒用。',
+      status: 'completed',
+      createdAt: addDays(now, -2),
+      confirmedAt: addDays(now, -2),
+      handingAt: addDays(now, -2),
+      completedAt: addDays(now, -2),
+      confirmerId: 'u_c',
+      confirmerName: '周敏',
+      handoverPhoto: 'handover-r6.jpg（演示凭证：共享柜取件自拍）',
+      handoverNote: '封签完好，在有效期内。',
+    },
+    // 周敏申请同批次碘伏棉签：冻结时候补自动取消并通知
+    {
+      id: 'r7',
+      itemId: 'i13',
+      applicantId: 'u_c',
+      applicantName: '周敏',
+      scene: 'home_care',
+      quantity: 1,
+      method: 'door_contactless',
+      status: 'cancelled',
+      createdAt: addHours(now, -6),
+      closedAt: addHours(now, -4),
+      cancelReason: '同批次收到疑似使用后不适反馈被冻结，候补申请自动取消',
+    },
   ]
 
+  const frozenAt = addHours(now, -4)
   const feedbacks: Feedback[] = [
     {
       id: 'f1',
@@ -346,13 +475,105 @@ function buildSeed(now: string): { items: Item[]; requests: BorrowRequest[]; fee
       createdAt: addHours(now, -3),
       status: 'open',
     },
+    // 碘伏红肿反馈：触发同批次冻结与多方通知的主线案例
+    {
+      id: 'f3',
+      itemId: 'i2',
+      requestId: 'r6',
+      reporterId: 'u_b',
+      reporterName: '李建国',
+      type: 'adverse_reaction',
+      detail: '用碘伏棉片给老人小伤口消毒约半小时后，伤口周围皮肤发红、肿胀并发痒，已取下并用清水冲洗。',
+      createdAt: frozenAt,
+      status: 'open',
+      symptoms: '接触部位皮肤发红；局部肿胀；瘙痒/灼热感',
+      usageMethod: '用碘伏棉片湿敷/擦拭',
+      allergyHistory: '不清楚，没有留意过',
+      soughtMedicalCare: true,
+      medicalNote: '已到社区卫生服务中心就诊，医生考虑接触性皮炎，建议停用并观察（演示记录）。',
+      packagePhoto: 'feedback-f3-package.jpg（演示凭证：包装与生产批号照片）',
+      batchKey: iodKey,
+      batchLabel: batchLabel('iodophor', IODOPHOR_BATCH),
+    },
   ]
 
-  return { items, requests, feedbacks }
+  const frozenBatches: FrozenBatch[] = [
+    {
+      key: iodKey,
+      category: 'iodophor',
+      batchNo: IODOPHOR_BATCH,
+      label: batchLabel('iodophor', IODOPHOR_BATCH),
+      sourceFeedbackId: 'f3',
+      sourceItemId: 'i2',
+      reason: '借用人使用碘伏棉片后反馈接触部位皮肤红肿，已就医',
+      frozenAt,
+      status: 'frozen',
+      itemIds: ['i2', 'i13'],
+    },
+  ]
+
+  const riskWarnings: CategoryRiskWarning[] = []
+
+  const notifications: AppNotification[] = [
+    {
+      id: 'n1',
+      at: frozenAt,
+      kind: 'batch_frozen',
+      title: '你共享的碘伏棉片同批次已冻结',
+      body: `借用人使用批号 ${IODOPHOR_BATCH} 碘伏后反馈皮肤红肿。你共享的碘伏棉片剩余库存已立即冻结，暂停借用与交接，待社区核查后通知结论。`,
+      userId: 'u_c',
+      itemIds: ['i2'],
+    },
+    {
+      id: 'n2',
+      at: frozenAt,
+      kind: 'batch_frozen',
+      title: '你共享的碘伏棉签同批次已冻结',
+      body: `你共享的碘伏棉签与被反馈的碘伏棉片为同一批号 ${IODOPHOR_BATCH}，已连带冻结，请先不要自行处置或外借。`,
+      userId: 'u_a',
+      itemIds: ['i13'],
+    },
+    {
+      id: 'n3',
+      at: frozenAt,
+      kind: 'batch_frozen',
+      title: '碘伏同批次风险待核查',
+      body: `批号 ${IODOPHOR_BATCH} 的碘伏类物品已全部冻结（2 件），有居民反馈使用后皮肤红肿并已就医，请尽快联系反馈人、登记过敏史与包装凭证并给出核查结论。`,
+      userId: 'u_s',
+      roleTargets: ['staff'],
+      itemIds: ['i2', 'i13'],
+    },
+    {
+      id: 'n4',
+      at: frozenAt,
+      kind: 'batch_frozen',
+      title: '你借用的碘伏棉片同批次已冻结',
+      body: '你此前借走的碘伏棉片同批次已暂停共享。如仍有未使用的棉片请暂停使用；若皮肤红肿持续或加重，请立即就医并保留包装。',
+      userId: 'u_b',
+      itemIds: ['i2'],
+    },
+    {
+      id: 'n5',
+      at: frozenAt,
+      kind: 'request_cancelled',
+      title: '你的碘伏棉签申请已取消',
+      body: `因同批次（${IODOPHOR_BATCH}）收到疑似不适反馈并冻结，你的候补申请已自动取消。页面已为你推荐纱布、创可贴等安全替代物及就医渠道。`,
+      userId: 'u_c',
+      itemIds: ['i13'],
+    },
+  ]
+
+  return { items, requests, feedbacks, frozenBatches, riskWarnings, notifications }
 }
 
-/** 由物品/申请/反馈快照重建全流程时间线（种子数据与数据修复共用） */
-export function rebuildTimeline(items: Item[], requests: BorrowRequest[], feedbacks: Feedback[]): TimelineEvent[] {
+/** 由物品/申请/反馈/冻结快照重建全流程时间线（种子数据与数据修复共用） */
+export function rebuildTimeline(
+  items: Item[],
+  requests: BorrowRequest[],
+  feedbacks: Feedback[],
+  frozenBatches: FrozenBatch[] = [],
+  riskWarnings: CategoryRiskWarning[] = [],
+): TimelineEvent[] {
   const events: TimelineEvent[] = []
   const push = (e: TimelineEvent) => events.push(e)
 
@@ -394,10 +615,35 @@ export function rebuildTimeline(items: Item[], requests: BorrowRequest[], feedba
     push({ id: `${f.id}_fb`, itemId: f.itemId, requestId: f.requestId, at: f.createdAt, actorId: f.reporterId, actorName: f.reporterName, kind: 'feedback', detail: `${f.type === 'package_damaged' ? '包装破损反馈' : f.type === 'adverse_reaction' ? '疑似不适反应反馈' : '其他反馈'}：${f.detail}` })
   }
 
+  // 同批次冻结/解封/下架：事件挂到批次内每件物品，保证多件物品记录对得上
+  for (const fb of frozenBatches) {
+    const verb = fb.status === 'delisted' ? '同批次核查后下架' : fb.status === 'restored' || fb.status === 'warning' ? '同批次核查后恢复' : '同批次立即冻结'
+    const kind = fb.status === 'delisted' ? 'batch_delisted' : fb.status === 'restored' || fb.status === 'warning' ? 'batch_restored' : 'batch_frozen'
+    const at = fb.resolvedAt ?? fb.frozenAt
+    for (const id of fb.itemIds) {
+      push({ id: `${fb.key}_${kind}_${id}`, itemId: id, at, actorId: 'system', actorName: '系统', kind, detail: `${verb}：${fb.label}${fb.actionNote ? `；${fb.actionNote}` : ''}` })
+    }
+  }
+
+  // 品类级风险提醒：挂到该品类每件物品
+  for (const w of riskWarnings) {
+    for (const it of items.filter((i) => i.category === w.category)) {
+      push({ id: `warn_${w.category}_${it.id}`, itemId: it.id, at: w.at, actorId: w.staffId, actorName: w.staffName, kind: 'risk_warning', detail: `品类风险提醒：${w.note}` })
+    }
+  }
+
   return events.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0))
 }
 
 export function freshState(now: string) {
-  const { items, requests, feedbacks } = buildSeed(now)
-  return { items, requests, feedbacks, timeline: rebuildTimeline(items, requests, feedbacks) }
+  const { items, requests, feedbacks, frozenBatches, riskWarnings, notifications } = buildSeed(now)
+  return {
+    items,
+    requests,
+    feedbacks,
+    frozenBatches,
+    riskWarnings,
+    notifications,
+    timeline: rebuildTimeline(items, requests, feedbacks, frozenBatches, riskWarnings),
+  }
 }
