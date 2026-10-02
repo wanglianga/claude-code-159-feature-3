@@ -4,6 +4,7 @@ import { RouterLink, RouterView, useRoute } from 'vue-router'
 import { useMedkitStore } from '@/stores/medkit'
 import { useFlash } from '@/composables/useFlash'
 import { fmtDateTime } from '@/utils/date'
+import NotificationBell from '@/components/NotificationBell.vue'
 
 const store = useMedkitStore()
 const route = useRoute()
@@ -32,6 +33,7 @@ function advance(h: number) {
         <RouterLink to="/guide">互助边界</RouterLink>
       </nav>
       <div class="header-spacer"></div>
+      <NotificationBell />
       <div class="session-box">
         <span>当前身份</span>
         <select :value="store.currentUserId" @change="store.switchUser(($event.target as HTMLSelectElement).value)">

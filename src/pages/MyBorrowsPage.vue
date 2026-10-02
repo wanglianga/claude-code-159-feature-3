@@ -62,6 +62,18 @@ function closeBorrow(id: string) {
   <div v-for="r in myRequests" :key="r.id" class="card">
     <RequestCard :req="r" :item-name="itemOf(r.itemId)?.name ?? r.itemId" />
 
+    <!-- 已取走但同批次被冻结核查：提醒停止使用 -->
+    <div
+      v-if="r.status === 'completed' && itemOf(r.itemId)?.frozenByFeedbackId"
+      class="banner banner-danger"
+      style="margin-top: 8px"
+    >
+      <strong>🧊 你借用的「{{ itemOf(r.itemId)?.name }}」同批次已被冻结，正在社区核查。</strong>
+      请<strong>立即停止使用</strong>手头该批次物品并保留包装；如已出现红肿、瘙痒、皮疹或呼吸不畅，请清水冲洗后尽快就医。
+      社区工作人员会回访你，核查结论（个体过敏 / 物品问题）将通过消息通知；需要替代物品请
+      <RouterLink :to="`/items/${r.itemId}`">查看安全替代与就医渠道</RouterLink>。
+    </div>
+
     <div v-if="itemOf(r.itemId)" class="muted" style="margin: 6px 0">
       物品效期：<ExpiryBadge :expiry-date="itemOf(r.itemId)!.expiryDate" :now="store.nowIso" />
       · 取用地点：{{ itemOf(r.itemId)!.location }}

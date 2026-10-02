@@ -117,6 +117,10 @@ function confirmWaiting(id: string) {
       </dl>
       <p v-if="it.note" class="muted">留言：{{ it.note }}</p>
 
+      <div v-if="it.frozenByFeedbackId" class="banner banner-danger" style="margin-top: 8px">
+        🧊 该物品批号正在风险核查中，已被冻结，<strong>审核操作暂停</strong>，等待社区工作人员出具核查结论。
+      </div>
+
       <!-- 规则复核提示：再次机器校验，辅助志愿者把关 -->
       <template v-if="validateDraft(it, store.nowIso).errors.length">
         <div v-for="(e, i) in validateDraft(it, store.nowIso).errors" :key="i" class="banner banner-danger" style="margin-top: 8px">⛔ 规则拦截：{{ e }}</div>
@@ -126,8 +130,8 @@ function confirmWaiting(id: string) {
       </template>
 
       <div class="card-actions">
-        <button class="btn btn-primary btn-sm" @click="approve(it.id)">核验通过，发布</button>
-        <button class="btn btn-danger btn-sm" @click="reject(it.id)">驳回（处方药/拆封/冷链等）</button>
+        <button class="btn btn-primary btn-sm" :disabled="!!it.frozenByFeedbackId" @click="approve(it.id)">核验通过，发布</button>
+        <button class="btn btn-danger btn-sm" :disabled="!!it.frozenByFeedbackId" @click="reject(it.id)">驳回（处方药/拆封/冷链等）</button>
         <button class="btn btn-sm" @click="router.push(`/items/${it.id}`)">打开物品页</button>
       </div>
     </div>

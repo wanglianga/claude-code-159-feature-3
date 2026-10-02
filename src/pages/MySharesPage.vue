@@ -92,13 +92,17 @@ function recall(id: string) {
       <div v-if="it.status === 'rejected'" class="banner banner-danger" style="margin-top: 8px">
         审核未通过：{{ it.review?.reason || it.closeReason || '不符合共享范围' }}
       </div>
-      <div v-if="it.closeReason && ['quarantined', 'recalled', 'scrapped'].includes(it.status)" class="banner banner-info" style="margin-top: 8px">
+      <div v-if="it.frozenByFeedbackId" class="banner banner-danger" style="margin-top: 8px">
+        <strong>🧊 该物品（批号 {{ it.batchNo ?? '未标注' }}）因使用后不适反馈被同批次冻结，正在社区核查。</strong>
+        暂停借用与交接，核查结论会通过消息通知你；结论为个体过敏将恢复共享并加入风险提醒，确认为物品问题则同批次报废。
+      </div>
+      <div v-else-if="it.closeReason && ['quarantined', 'recalled', 'scrapped'].includes(it.status)" class="banner banner-info" style="margin-top: 8px">
         {{ it.closeReason }}
       </div>
       <div class="card-actions">
         <button class="btn btn-sm" @click="router.push(`/items/${it.id}`)">查看全流程记录</button>
         <button
-          v-if="!['recalled', 'scrapped', 'rejected'].includes(it.status)"
+          v-if="!['recalled', 'scrapped', 'rejected'].includes(it.status) && !it.frozenByFeedbackId"
           class="btn btn-sm btn-danger"
           @click="recall(it.id)"
         >

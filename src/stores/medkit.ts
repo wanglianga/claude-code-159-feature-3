@@ -2,20 +2,37 @@ import { defineStore } from 'pinia'
 import { computed, reactive, ref } from 'vue'
 import type {
   BorrowRequest,
+  Category,
   Feedback,
   FeedbackType,
   HandoverMethod,
+  Investigation,
+  InvestigationAction,
+  InvestigationConclusion,
   Item,
   ItemDraft,
+  Notice,
+  ReactionSymptom,
   RequestStatus,
+  RiskNotice,
   Scene,
   TimelineEvent,
+  UsageMethod,
 } from '@/types'
-import { DELIVERY_SLA_HOURS, PICKUP_WINDOW_HOURS, STOCK_LOCKING_STATUSES, validateDraft } from '@/rules'
+import {
+  DELIVERY_SLA_HOURS,
+  PICKUP_WINDOW_HOURS,
+  STOCK_LOCKING_STATUSES,
+  batchKey,
+  buildRiskNoticeText,
+  isValidBatchNo,
+  normalizeBatchNo,
+  validateDraft,
+} from '@/rules'
 import { addHours, daysUntil, hoursSince } from '@/utils/date'
 import { BASE_NOW, DEMO_USERS, freshState, uid } from '@/data/seed'
 
-const STORAGE_KEY = 'medkit-share-state-v1'
+const STORAGE_KEY = 'medkit-share-state-v2'
 
 interface PersistShape {
   nowIso: string
@@ -23,6 +40,8 @@ interface PersistShape {
   items: Item[]
   requests: BorrowRequest[]
   feedbacks: Feedback[]
+  riskNotices: RiskNotice[]
+  notices: Notice[]
   timeline: TimelineEvent[]
 }
 
@@ -33,17 +52,51 @@ interface ActionResult {
 
 export class ActionError extends Error {}
 
+// 症状短文案映射（用于核查通知文本，避免与 UI 层循环依赖）
+const SYMPTOM_TEXT: Record<ReactionSymptom, string> = {
+  redness_swelling: '接触部位红肿',
+  itch: '瘙痒皮疹',
+  blister: '起水疱/破溃',
+  breathing: '胸闷呼吸不畅',
+  fever: '发热',
+  other_symptom: '其他不适',
+}
+
+/** 不适反馈的结构化上报内容 */
+export interface AdverseReportPayload {
+  detail: string
+  symptoms: ReactionSymptom[]
+  allergyHistory: string
+  usageMethod: UsageMethod
+  usageDetail?: string
+  packagePhotos: string[]
+  soughtMedicalCare: boolean
+  medicalNote?: string
+}
+
+export interface ResolvePayload {
+  conclusion: InvestigationConclusion
+  note: string
+}
+
 function load(): PersistShape | null {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
     if (!raw) return null
     const data = JSON.parse(raw) as PersistShape
     if (!Array.isArray(data.items) || !Array.isArray(data.requests)) return null
+    if (!Array.isArray(data.riskNotices) || !Array.isArray(data.notices)) return null
     return data
   } catch {
     return null
   }
 }
+
+/** 冻结会连带处置的非终态物品状态 */
+const FREEZABLE_STATUSES: Item['status'][] = ['pending_review', 'published', 'partially_lent', 'lent_out', 'quarantined']
+/** 冻结时需要取消的在途申请状态（已取走的保留，只通知） */
+const INFLIGHT_STATUSES: RequestStatus[] = ['waiting', 'confirmed', 'handing']
+const TERMINAL_STATUSES: Item['status'][] = ['scrapped', 'recalled', 'rejected']
 
 export const useMedkitStore = defineStore('medkit', () => {
   const persisted = load()
@@ -54,6 +107,8 @@ export const useMedkitStore = defineStore('medkit', () => {
   const items = ref<Item[]>(seed.items)
   const requests = ref<BorrowRequest[]>(seed.requests)
   const feedbacks = ref<Feedback[]>(seed.feedbacks)
+  const riskNotices = ref<RiskNotice[]>(seed.riskNotices)
+  const notices = ref<Notice[]>(seed.notices)
   const timeline = ref<TimelineEvent[]>(seed.timeline)
 
   function persist() {
@@ -63,6 +118,8 @@ export const useMedkitStore = defineStore('medkit', () => {
       items: items.value,
       requests: requests.value,
       feedbacks: feedbacks.value,
+      riskNotices: riskNotices.value,
+      notices: notices.value,
       timeline: timeline.value,
     }
     localStorage.setItem(STORAGE_KEY, JSON.stringify(data))
@@ -70,6 +127,17 @@ export const useMedkitStore = defineStore('medkit', () => {
 
   function addEvent(e: Omit<TimelineEvent, 'id'>) {
     timeline.value.push({ ...e, id: uid('ev') })
+  }
+
+  function pushNotice(n: Omit<Notice, 'id' | 'at' | 'readBy'> & { at?: string }) {
+    const notice: Notice = {
+      ...n,
+      id: uid('n'),
+      at: n.at ?? nowIso.value,
+      readBy: [],
+    }
+    notices.value.unshift(notice)
+    return notice
   }
 
   // ---- 时钟与会话 ----
@@ -82,6 +150,8 @@ export const useMedkitStore = defineStore('medkit', () => {
     items.value = f.items
     requests.value = f.requests
     feedbacks.value = f.feedbacks
+    riskNotices.value = f.riskNotices
+    notices.value = f.notices
     timeline.value = f.timeline
     nowIso.value = BASE_NOW
     currentUserId.value = 'u_b'
@@ -141,6 +211,7 @@ export const useMedkitStore = defineStore('medkit', () => {
 
     const it: Item = reactive({
       ...draft,
+      batchNo: normalizeBatchNo(draft.batchNo) || undefined,
       id: uid('i'),
       ownerId: currentUserId.value,
       ownerName: currentUser.value.name,
@@ -154,7 +225,7 @@ export const useMedkitStore = defineStore('medkit', () => {
       actorId: currentUserId.value,
       actorName: currentUser.value.name,
       kind: 'registered',
-      detail: `登记「${it.name} ${it.spec}」×${it.quantity}`,
+      detail: `登记「${it.name} ${it.spec}」×${it.quantity}${it.batchNo ? `，批号 ${it.batchNo}` : ''}`,
     })
     persist()
     return { ok: true, message: warnings.length ? warnings.join(' ') : '登记成功，等待志愿者审核后发布。' }
@@ -165,6 +236,7 @@ export const useMedkitStore = defineStore('medkit', () => {
     if (!isVolunteer.value) return { ok: false, message: '只有志愿者可以审核物品。' }
     const it = requireItem(itemId)
     if (it.status !== 'pending_review') return { ok: false, message: '该物品不在待审核状态。' }
+    if (it.frozenByFeedbackId) return { ok: false, message: '该物品所属批次正在风险核查中，暂不能发布，等待社区工作人员结论。' }
 
     if (approved) {
       if (daysUntil(it.expiryDate, nowIso.value) < 0) return { ok: false, message: '物品已过期，不能发布，应驳回并引导报废。' }
@@ -196,6 +268,7 @@ export const useMedkitStore = defineStore('medkit', () => {
     if (it.status !== 'pending_review' || it.category !== 'other_consumable' || !it.review?.approved) {
       return { ok: false, message: '该物品不需要复核或状态不正确。' }
     }
+    if (it.frozenByFeedbackId) return { ok: false, message: '该物品所属批次正在风险核查中，暂不能发布。' }
     if (!approved) {
       it.status = 'rejected'
       it.closeReason = reason
@@ -211,9 +284,20 @@ export const useMedkitStore = defineStore('medkit', () => {
   }
 
   // ---- 居民：申请借用 ----
-  function apply(itemId: string, quantity: number, scene: Scene, method: HandoverMethod, note?: string): ActionResult {
+  function apply(
+    itemId: string,
+    quantity: number,
+    scene: Scene,
+    method: HandoverMethod,
+    note?: string,
+    ackRisk = false,
+  ): ActionResult {
     const it = requireItem(itemId)
     if (!['published', 'partially_lent', 'lent_out'].includes(it.status)) return { ok: false, message: '该物品当前不可申请。' }
+    if (it.frozenByFeedbackId) return { ok: false, message: '该物品所属批次正在风险核查中，已暂停借用。' }
+    if (activeRiskNoticeFor(it.category) && !ackRisk) {
+      return { ok: false, message: '该品类有“个体过敏”风险提醒，请阅读提醒并勾选知情确认后再申请。' }
+    }
     if (daysUntil(it.expiryDate, nowIso.value) < 0) {
       return { ok: false, message: '该物品已过期（超过有效期），不能借用，已提示工作人员报废。' }
     }
@@ -263,6 +347,7 @@ export const useMedkitStore = defineStore('medkit', () => {
     if (it.status === 'recalled' || it.status === 'scrapped' || it.status === 'rejected') {
       return { ok: false, message: '物品已不可借，不能确认。' }
     }
+    if (it.frozenByFeedbackId) return { ok: false, message: '物品所属批次正在风险核查中，不能确认，建议引导申请人改用安全替代物。' }
     if (availableQty(r.itemId) < r.quantity) {
       return { ok: false, message: '余量不足，保持候补；可联系申请人协商数量，或等待归还/补充。' }
     }
@@ -286,7 +371,7 @@ export const useMedkitStore = defineStore('medkit', () => {
     if (!r) return { ok: false, message: '申请不存在。' }
     if (r.status !== 'confirmed') return { ok: false, message: '需先确认申请才能开始交接。' }
     const it = requireItem(r.itemId)
-    if (it.status === 'quarantined') return { ok: false, message: '物品已被风险隔离，暂停交接。' }
+    if (it.status === 'quarantined' || it.frozenByFeedbackId) return { ok: false, message: '物品已被风险隔离/批次核查冻结，暂停交接。' }
     r.status = 'handing'
     r.handingAt = nowIso.value
     if (r.method === 'volunteer_delivery' && !r.volunteerId && isVolunteer.value) {
@@ -306,7 +391,7 @@ export const useMedkitStore = defineStore('medkit', () => {
     if (r.status !== 'handing') return { ok: false, message: '交接尚未开始。' }
     if (!photo.trim()) return { ok: false, message: '请先拍照上传交接凭证再确认。' }
     const it = requireItem(r.itemId)
-    if (it.status === 'quarantined') return { ok: false, message: '物品已被风险隔离，不能完成交接。' }
+    if (it.status === 'quarantined' || it.frozenByFeedbackId) return { ok: false, message: '物品已被风险隔离/批次核查冻结，不能完成交接。' }
     r.status = 'completed'
     r.completedAt = nowIso.value
     r.handoverPhoto = photo
@@ -400,6 +485,7 @@ export const useMedkitStore = defineStore('medkit', () => {
     const it = requireItem(itemId)
     if (it.ownerId !== currentUserId.value && !isStaff.value) return { ok: false, message: '只有共享人本人可以撤回。' }
     if (it.status === 'scrapped' || it.status === 'recalled') return { ok: false, message: '物品已结束流转。' }
+    if (it.frozenByFeedbackId) return { ok: false, message: '该物品所属批次正在风险核查中，暂不能撤回，请等待社区核查结论。' }
     it.status = 'recalled'
     it.closeReason = reason
     // 已确认/交接中的借用继续履行；候补中申请全部取消
@@ -416,14 +502,123 @@ export const useMedkitStore = defineStore('medkit', () => {
     return { ok: true, message: inflight ? `已撤回，不再接受新申请；${inflight} 笔进行中的借用将继续完成交接与归还。` : '物品已撤回，候补申请已通知取消。' }
   }
 
-  // ---- 反馈：包装破损 / 疑似不适 ----
-  function reportFeedback(itemId: string, type: FeedbackType, detail: string, requestId?: string): ActionResult {
+  // ---- 反馈：包装破损 / 疑似不适（不适反馈即冻结同批次） ----
+
+  /** 找出与某物品同品类同批号、需要一起冻结的物品 */
+  function sameBatchItems(source: Item): Item[] {
+    if (!isValidBatchNo(source.batchNo)) return []
+    const key = batchKey(source.category, source.batchNo)
+    return items.value.filter(
+      (i) =>
+        i.id !== source.id &&
+        FREEZABLE_STATUSES.includes(i.status) &&
+        !i.frozenByFeedbackId &&
+        batchKey(i.category, i.batchNo) === key,
+    )
+  }
+
+  /** 收集一批物品的相关人：共享人、已借用居民、在途申请人 */
+  function audienceFor(itemIds: string[]): string[] {
+    const ids = new Set<string>()
+    for (const id of itemIds) {
+      const it = itemsById.value.get(id)
+      if (it) ids.add(it.ownerId)
+      for (const r of requests.value.filter((x) => x.itemId === id && x.status !== 'cancelled')) {
+        ids.add(r.applicantId)
+      }
+    }
+    for (const u of DEMO_USERS) {
+      if (u.role === 'staff' || u.role === 'volunteer') ids.add(u.id)
+    }
+    return [...ids]
+  }
+
+  /**
+   * 冻结一批物品并取消在途申请；已取走的借用保留、仅通知。
+   * 返回实际冻结的物品（含来源物品）。
+   */
+  function freezeForFeedback(fb: Feedback, source: Item, targets: Item[], reason: (it: Item) => string): Item[] {
+    const all = [source, ...targets.filter((t) => t.id !== source.id)]
+    const frozen: Item[] = []
+
+    for (const it of all) {
+      if (TERMINAL_STATUSES.includes(it.status)) continue
+      if (it.status === 'quarantined' && it.frozenByFeedbackId && it.frozenByFeedbackId !== fb.id) {
+        // 已因其他反馈隔离：不覆盖原冻结关系
+        continue
+      }
+      it.preFreezeStatus = it.status === 'quarantined' ? it.preFreezeStatus ?? 'published' : it.status
+      it.status = 'quarantined'
+      it.frozenByFeedbackId = fb.id
+      it.closeReason = reason(it)
+      frozen.push(it)
+
+      // 取消该物品在途申请（候补/已确认/交接中），已取走的保留
+      for (const r of requests.value.filter((x) => x.itemId === it.id && INFLIGHT_STATUSES.includes(x.status))) {
+        const label: RequestStatus = r.status
+        r.status = 'cancelled'
+        r.closedAt = nowIso.value
+        r.frozenByFeedbackId = fb.id
+        r.cancelReason =
+          fb.type === 'adverse_reaction'
+            ? `同批号物品收到使用后不适反馈，批次冻结核查，${label === 'waiting' ? '候补' : '交接'}取消`
+            : '物品收到风险反馈被隔离，暂停交接'
+        addEvent({
+          itemId: it.id,
+          requestId: r.id,
+          at: nowIso.value,
+          actorId: 'system',
+          actorName: '系统',
+          kind: 'cancelled',
+          detail: `风险冻结，${label === 'waiting' ? '候补申请' : label === 'confirmed' ? '已确认申请' : '交接中申请'}取消：${r.cancelReason}`,
+        })
+        pushNotice({
+          kind: 'request_cancelled',
+          title: '你的借用申请因批次风险核查被取消',
+          body: `「${it.name}（批号 ${it.batchNo ?? '未标注'}）」${r.cancelReason}。请查看推荐的安全替代物或就医渠道，无需承担违约责任。`,
+          itemId: it.id,
+          feedbackId: fb.id,
+          requestId: r.id,
+          recipientIds: [r.applicantId],
+        })
+      }
+
+      addEvent({
+        itemId: it.id,
+        at: nowIso.value,
+        actorId: fb.reporterId,
+        actorName: fb.reporterName,
+        kind: it.riskSource ? 'quarantined' : 'batch_quarantined',
+        detail: reason(it),
+      })
+    }
+    return frozen
+  }
+
+  function reportFeedback(
+    itemId: string,
+    type: FeedbackType,
+    detail: string,
+    requestId?: string,
+    adverse?: AdverseReportPayload,
+  ): ActionResult {
     const it = requireItem(itemId)
     if (!detail.trim()) return { ok: false, message: '请填写具体情况描述。' }
+    if (type === 'adverse_reaction' && adverse && adverse.symptoms.length === 0) {
+      return { ok: false, message: '请至少勾选一种使用后出现的症状表现。' }
+    }
+    // 未指定借用记录时，自动关联反馈人在该物品上最近一笔已取走/已闭环借用，便于社区追溯
+    let linkedRequestId = requestId
+    if (!linkedRequestId) {
+      linkedRequestId = requests.value
+        .filter((r) => r.itemId === itemId && r.applicantId === currentUserId.value && ['completed', 'closed_returned'].includes(r.status))
+        .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))[0]?.id
+    }
+
     const fb: Feedback = reactive({
       id: uid('f'),
       itemId,
-      requestId,
+      requestId: linkedRequestId,
       reporterId: currentUserId.value,
       reporterName: currentUser.value.name,
       type,
@@ -431,62 +626,211 @@ export const useMedkitStore = defineStore('medkit', () => {
       createdAt: nowIso.value,
       status: 'open',
     })
+    if (type === 'adverse_reaction' && adverse) {
+      fb.symptoms = adverse.symptoms
+      fb.allergyHistory = adverse.allergyHistory.trim() || '未填写'
+      fb.usageMethod = adverse.usageMethod
+      fb.usageDetail = adverse.usageDetail?.trim() || undefined
+      fb.packagePhotos = adverse.packagePhotos
+      fb.soughtMedicalCare = adverse.soughtMedicalCare
+      fb.medicalNote = adverse.medicalNote?.trim() || undefined
+    }
     feedbacks.value.unshift(fb)
-    addEvent({ itemId, requestId, at: nowIso.value, actorId: currentUserId.value, actorName: currentUser.value.name, kind: 'feedback', detail: `${type === 'package_damaged' ? '包装破损反馈' : type === 'adverse_reaction' ? '疑似使用后不适反馈' : '反馈'}：${detail}` })
+    addEvent({
+      itemId,
+      requestId: linkedRequestId,
+      at: nowIso.value,
+      actorId: currentUserId.value,
+      actorName: currentUser.value.name,
+      kind: 'feedback',
+      detail: `${type === 'package_damaged' ? '包装破损反馈' : type === 'adverse_reaction' ? '使用后不适反馈（皮肤红肿等）' : '反馈'}：${detail}`,
+    })
 
-    // 安全优先：破损/疑似不适立即隔离，停止新借用与交接
-    if ((type === 'package_damaged' || type === 'adverse_reaction') && !['scrapped', 'recalled', 'rejected'].includes(it.status)) {
-      it.status = 'quarantined'
-      it.closeReason = type === 'package_damaged' ? '收到包装破损反馈，已隔离待核查' : '收到疑似不适反应反馈，已隔离待核查'
-      for (const r of requests.value.filter((x) => x.itemId === itemId && ['waiting', 'confirmed', 'handing'].includes(x.status))) {
-        const label: RequestStatus = r.status
-        r.status = 'cancelled'
-        r.closedAt = nowIso.value
-        r.cancelReason = type === 'package_damaged' ? '物品包装破损被隔离，暂停交接' : '物品收到疑似不适反馈被隔离，暂停交接'
-        addEvent({ itemId, requestId: r.id, at: nowIso.value, actorId: 'system', actorName: '系统', kind: 'cancelled', detail: `风险隔离，${label === 'waiting' ? '候补' : '交接中'}申请取消` })
-      }
-      addEvent({ itemId, at: nowIso.value, actorId: currentUserId.value, actorName: currentUser.value.name, kind: 'quarantined', detail: type === 'package_damaged' ? '包装破损：物品已隔离，待工作人员核查' : '疑似不适反应：物品已隔离，建议反馈人就医并保留包装' })
+    // 安全优先：风险反馈立即冻结；不适反馈连带冻结同品类同批号的全部物品
+    if ((type === 'package_damaged' || type === 'adverse_reaction') && !TERMINAL_STATUSES.includes(it.status)) {
+      it.riskSource = true
+      const batchPeers = type === 'adverse_reaction' ? sameBatchItems(it) : []
+      // 在取消在途申请之前收集通知对象（共享人/已借用居民/在途申请人/社区）
+      const recipients = [...new Set([...audienceFor([it.id, ...batchPeers.map((p) => p.id)]), fb.reporterId])]
+      const frozen = freezeForFeedback(fb, it, batchPeers, (target) => {
+        if (type === 'package_damaged') return '收到包装破损反馈，物品已隔离待社区核查'
+        if (target.id === it.id) {
+          return `借用人反馈使用后${adverse?.soughtMedicalCare ? '（已就医）' : ''}皮肤红肿等不适，物品及同批号剩余物品立即冻结，待社区核查`
+        }
+        return `同批号（${it.batchNo}）物品收到使用后不适反馈，连带冻结同批次剩余物品，待社区核查`
+      })
+      fb.frozenItemIds = frozen.map((x) => x.id)
+
+      const ownerNames = [...new Set(frozen.map((x) => x.ownerName))].join('、')
+      const borrowerNames = [
+        ...new Set(
+          requests.value
+            .filter((r) => frozen.some((x) => x.id === r.itemId) && ['completed', 'closed_returned'].includes(r.status))
+            .map((r) => r.applicantName),
+        ),
+      ]
+      pushNotice({
+        kind: 'quarantine',
+        title:
+          type === 'adverse_reaction'
+            ? `⚠️ 使用后不适反馈：${it.name}（批号 ${it.batchNo ?? '未标注'}）同批次已冻结`
+            : `⚠️ 包装破损反馈：${it.name} 已隔离`,
+        body:
+          type === 'adverse_reaction'
+            ? `${fb.reporterName} 使用后反馈皮肤红肿等不适。同批次（同品类同批号）共 ${frozen.length} 件物品已立即冻结，在途申请全部取消；共享人：${ownerNames}；已借用居民：${borrowerNames.length ? borrowerNames.join('、') : '暂无'}。请社区尽快回访核查，确认个体过敏或物品问题后再决定下架、恢复或风险提醒。`
+            : `${fb.reporterName} 反馈包装破损，物品已隔离待核查。共享人：${ownerNames}。`,
+        itemId: it.id,
+        feedbackId: fb.id,
+        recipientIds: recipients,
+      })
     }
     persist()
     return {
       ok: true,
       message:
         type === 'adverse_reaction'
-          ? '已记录并隔离该物品。如不适持续或加重，请立即就医；社区仅做物品流转与风险提醒，不提供诊断。'
+          ? `已记录并立即冻结同批次剩余物品，共享人、社区与已借用居民均已收到通知。${adverse?.soughtMedicalCare ? '感谢就医反馈；' : ''}如红肿持续/加重或出现呼吸不畅，请立即就医；社区仅做物品流转与风险提醒，不提供诊断。`
           : '已记录反馈，物品已隔离，待社区工作人员核查处理。',
     }
   }
 
-  /** 工作人员处置反馈：报废 或 核查后重新发布 */
-  function resolveFeedback(feedbackId: string, action: 'scrap' | 'republish', note: string): ActionResult {
+  /** 解除某条反馈冻结的全部物品，恢复到冻结前状态 */
+  function restoreFrozenItems(fb: Feedback) {
+    const linked = items.value.filter((i) => i.frozenByFeedbackId === fb.id)
+    for (const it of linked) {
+      it.status = it.preFreezeStatus && it.preFreezeStatus !== 'quarantined' ? it.preFreezeStatus : 'published'
+      it.frozenByFeedbackId = undefined
+      it.preFreezeStatus = undefined
+      it.closeReason = undefined
+      refreshItemStatus(it.id)
+    }
+    return linked
+  }
+
+  /** 工作人员处置反馈：个体过敏（恢复+风险提醒）/ 物品问题（同批次报废）/ 暂无法判定（仅恢复） */
+  function resolveFeedback(feedbackId: string, payload: ResolvePayload): ActionResult {
     if (!isStaff.value) return { ok: false, message: '只有社区工作人员可以处置风险反馈。' }
     const fb = feedbacks.value.find((f) => f.id === feedbackId)
     if (!fb || fb.status !== 'open') return { ok: false, message: '反馈不存在或已处置。' }
-    const it = requireItem(fb.itemId)
+    const source = requireItem(fb.itemId)
+    const linked = items.value.filter((i) => i.frozenByFeedbackId === fb.id || i.id === fb.itemId)
+    if (!payload.note.trim()) return { ok: false, message: '请填写核查记录与处置依据。' }
+
+    const action: InvestigationAction =
+      payload.conclusion === 'item_issue' ? 'scrap_batch' : payload.conclusion === 'individual_allergy' ? 'restore_with_notice' : 'restore_only'
+
+    const investigation: Investigation = {
+      at: nowIso.value,
+      handlerId: currentUserId.value,
+      handlerName: currentUser.value.name,
+      conclusion: payload.conclusion,
+      action,
+      sameBatchScrapped: action === 'scrap_batch',
+      riskNoticeAdded: action === 'restore_with_notice',
+      note: payload.note.trim(),
+    }
     fb.handledAt = nowIso.value
     fb.handlerId = currentUserId.value
     fb.handlerName = currentUser.value.name
-    fb.handleNote = note
+    fb.handleNote = payload.note.trim()
+    fb.investigation = investigation
 
-    if (action === 'scrap') {
+    const recipients = new Set<string>(audienceFor(linked.map((i) => i.id)))
+    recipients.add(fb.reporterId)
+    let message = ''
+
+    addEvent({
+      itemId: source.id,
+      requestId: fb.requestId,
+      at: nowIso.value,
+      actorId: currentUserId.value,
+      actorName: currentUser.value.name,
+      kind: 'investigated',
+      detail: `社区核查结论：${
+        payload.conclusion === 'individual_allergy' ? '个体过敏/个体反应' : payload.conclusion === 'item_issue' ? '物品问题' : '暂无法判定'
+      }；${payload.note.trim()}`,
+    })
+
+    if (action === 'scrap_batch') {
       fb.status = 'resolved_scrap'
-      it.status = 'scrapped'
-      it.closeReason = `工作人员核查后报废：${note}`
-      for (const r of requests.value.filter((x) => x.itemId === it.id && ['waiting', 'confirmed', 'handing'].includes(x.status))) {
-        r.status = 'cancelled'
-        r.closedAt = nowIso.value
-        r.cancelReason = '物品报废，申请取消'
+      const scrapped: Item[] = []
+      for (const it of linked) {
+        if (TERMINAL_STATUSES.includes(it.status)) continue
+        it.status = 'scrapped'
+        it.closeReason = `社区核查确认物品问题，同批次下架报废：${payload.note.trim()}`
+        it.frozenByFeedbackId = undefined
+        it.preFreezeStatus = undefined
+        scrapped.push(it)
+        for (const r of requests.value.filter((x) => x.itemId === it.id && INFLIGHT_STATUSES.includes(x.status))) {
+          r.status = 'cancelled'
+          r.closedAt = nowIso.value
+          r.frozenByFeedbackId = fb.id
+          r.cancelReason = '同批次核查确认为物品问题，已下架报废'
+        }
+        addEvent({ itemId: it.id, at: nowIso.value, actorId: currentUserId.value, actorName: currentUser.value.name, kind: 'scrapped', detail: `社区核查确认物品问题，同批次下架报废：${payload.note.trim()}` })
       }
-      addEvent({ itemId: it.id, at: nowIso.value, actorId: currentUserId.value, actorName: currentUser.value.name, kind: 'scrapped', detail: `核查报废：${note}` })
+      pushNotice({
+        kind: 'investigation',
+        title: `核查结论：物品问题，${source.name}（批号 ${source.batchNo ?? '未标注'}）同批次已下架报废`,
+        body: `社区工作人员${currentUser.value.name}核查确认为物品问题：${payload.note.trim()}。同批次共 ${scrapped.length} 件物品已报废并按医疗/有害垃圾流程处理，相关申请全部取消。`,
+        itemId: source.id,
+        feedbackId: fb.id,
+        recipientIds: [...recipients],
+      })
+      message = `已确认物品问题，同批次 ${scrapped.length} 件物品全部下架报废。`
     } else {
-      fb.status = 'resolved_republish'
-      it.status = 'published'
-      it.closeReason = undefined
-      refreshItemStatus(it.id)
-      addEvent({ itemId: it.id, at: nowIso.value, actorId: currentUserId.value, actorName: currentUser.value.name, kind: 'published', detail: `核查后重新发布：${note}` })
+      const restored = restoreFrozenItems(fb)
+      if (action === 'restore_with_notice') {
+        fb.status = 'resolved_risk_notice'
+        const symptomText = (fb.symptoms ?? []).map((s) => SYMPTOM_TEXT[s]).join('、')
+        const text = buildRiskNoticeText(source.category, symptomText)
+        const rn: RiskNotice = reactive({
+          id: uid('rn'),
+          category: source.category,
+          title: text.title,
+          detail: text.detail,
+          relatedItemId: source.id,
+          relatedFeedbackId: fb.id,
+          createdAt: nowIso.value,
+          createdBy: currentUserId.value,
+          createdByName: currentUser.value.name,
+          active: true,
+        })
+        riskNotices.value.unshift(rn)
+        addEvent({ itemId: source.id, at: nowIso.value, actorId: currentUserId.value, actorName: currentUser.value.name, kind: 'risk_notice', detail: `加入品类风险提醒：${text.title}` })
+        pushNotice({
+          kind: 'risk_notice',
+          title: `风险提醒：${text.title}`,
+          body: text.detail,
+          itemId: source.id,
+          feedbackId: fb.id,
+          recipientIds: DEMO_USERS.map((u) => u.id),
+        })
+        pushNotice({
+          kind: 'investigation',
+          title: `核查结论：个体过敏，${source.name} 已恢复共享`,
+          body: `社区回访核查倾向于个体过敏/个体反应，同批次共 ${restored.length} 件物品包装与质量核验合格，已解除冻结恢复共享，并对该品类加入风险提醒：${payload.note.trim()}`,
+          itemId: source.id,
+          feedbackId: fb.id,
+          recipientIds: [...recipients],
+        })
+        message = `已确认个体过敏：同批次 ${restored.length} 件物品恢复共享，品类风险提醒已发布。`
+      } else {
+        fb.status = 'resolved_republish'
+        addEvent({ itemId: source.id, at: nowIso.value, actorId: currentUserId.value, actorName: currentUser.value.name, kind: 'published', detail: `核查暂无法判定为物品问题，解除冻结恢复共享：${payload.note.trim()}` })
+        pushNotice({
+          kind: 'investigation',
+          title: `核查结论：暂无法判定，${source.name} 已解除冻结`,
+          body: `现有信息暂无法判定为物品问题，同批次共 ${restored.length} 件物品已解除冻结、恢复借用；社区将持续关注同类反馈。${payload.note.trim()}`,
+          itemId: source.id,
+          feedbackId: fb.id,
+          recipientIds: [...recipients],
+        })
+        message = `已解除冻结，同批次 ${restored.length} 件物品恢复共享。`
+      }
     }
     persist()
-    return { ok: true, message: action === 'scrap' ? '已报废并记录，按医疗/有害垃圾流程处理。' : '已解除隔离并重新发布。' }
+    return { ok: true, message }
   }
 
   /** 工作人员直接报废（过期物品清理等） */
@@ -496,6 +840,8 @@ export const useMedkitStore = defineStore('medkit', () => {
     if (it.status === 'scrapped') return { ok: false, message: '物品已报废。' }
     it.status = 'scrapped'
     it.closeReason = reason
+    it.frozenByFeedbackId = undefined
+    it.preFreezeStatus = undefined
     for (const r of requests.value.filter((x) => x.itemId === itemId && ['waiting', 'confirmed', 'handing'].includes(x.status))) {
       r.status = 'cancelled'
       r.closedAt = nowIso.value
@@ -504,6 +850,91 @@ export const useMedkitStore = defineStore('medkit', () => {
     addEvent({ itemId, at: nowIso.value, actorId: currentUserId.value, actorName: currentUser.value.name, kind: 'scrapped', detail: reason })
     persist()
     return { ok: true, message: '已报废，相关进行中申请已取消。' }
+  }
+
+  // ---- 风险提醒 / 冻结核查的派生数据 ----
+  function activeRiskNoticeFor(category: Category): RiskNotice | undefined {
+    return riskNotices.value.find((n) => n.active && n.category === category)
+  }
+
+  interface CategoryInvestigation {
+    category: Category
+    batchNos: string[]
+    itemIds: string[]
+    feedbacks: Feedback[]
+  }
+
+  /** 品类下正在核查（open 不适反馈）的批次信息，用于大厅/详情页拦截提示 */
+  const categoryInvestigations = computed<Map<Category, CategoryInvestigation>>(() => {
+    const map = new Map<Category, CategoryInvestigation>()
+    for (const fb of feedbacks.value.filter((f) => f.status === 'open' && f.type === 'adverse_reaction')) {
+      const source = itemsById.value.get(fb.itemId)
+      if (!source) continue
+      const frozen = items.value.filter((i) => i.frozenByFeedbackId === fb.id || (i.id === fb.itemId && i.status === 'quarantined'))
+      if (!frozen.length) continue
+      const entry = map.get(source.category) ?? { category: source.category, batchNos: [], itemIds: [], feedbacks: [] }
+      for (const b of frozen.map((i) => normalizeBatchNo(i.batchNo)).filter(Boolean)) {
+        if (!entry.batchNos.includes(b)) entry.batchNos.push(b)
+      }
+      for (const id of frozen.map((i) => i.id)) {
+        if (!entry.itemIds.includes(id)) entry.itemIds.push(id)
+      }
+      entry.feedbacks.push(fb)
+      map.set(source.category, entry)
+    }
+    return map
+  })
+
+  function investigationForCategory(category: Category): CategoryInvestigation | undefined {
+    return categoryInvestigations.value.get(category)
+  }
+  function investigationForItem(item: Item): CategoryInvestigation | undefined {
+    if (!item.frozenByFeedbackId) return undefined
+    return categoryInvestigations.value.get(item.category)
+  }
+
+  interface SafeAlternativeRow {
+    item: Item
+    available: number
+  }
+
+  /** 同品类、不同批号、未被冻结、在效期且有余量的安全替代物 */
+  function safeAlternativesForCategory(category: Category, excludeItemId?: string): SafeAlternativeRow[] {
+    const inv = categoryInvestigations.value.get(category)
+    const frozenBatches = new Set(inv?.batchNos ?? [])
+    return items.value
+      .filter((i) => i.category === category && i.id !== excludeItemId)
+      .filter((i) => ['published', 'partially_lent', 'lent_out'].includes(i.status) && !i.frozenByFeedbackId)
+      .filter((i) => daysUntil(i.expiryDate, nowIso.value) >= 0)
+      .filter((i) => !frozenBatches.has(normalizeBatchNo(i.batchNo)))
+      .map((i) => ({ item: i, available: availableQty(i.id) }))
+      .filter((x) => x.available > 0)
+  }
+
+  // ---- 通知中心 ----
+  const myNotices = computed(() =>
+    notices.value
+      .filter((n) => n.recipientIds.includes(currentUserId.value))
+      .sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0)),
+  )
+  const unreadCount = computed(() => myNotices.value.filter((n) => !n.readBy.includes(currentUserId.value)).length)
+
+  function markNoticeRead(id: string) {
+    const n = notices.value.find((x) => x.id === id)
+    if (n && !n.readBy.includes(currentUserId.value)) {
+      n.readBy.push(currentUserId.value)
+      persist()
+    }
+  }
+  function markAllNoticesRead() {
+    let changed = false
+    for (const n of notices.value) {
+      if (n.recipientIds.includes(currentUserId.value) && !n.readBy.includes(currentUserId.value)) {
+        n.readBy.push(currentUserId.value)
+        changed = true
+      }
+    }
+    if (changed) persist()
   }
 
   // ---- 看板派生数据 ----
@@ -566,6 +997,7 @@ export const useMedkitStore = defineStore('medkit', () => {
       expired: expiredListed.value.length,
       quarantined: items.value.filter((i) => i.status === 'quarantined').length,
       scrapped: items.value.filter((i) => i.status === 'scrapped').length,
+      activeRiskNotices: riskNotices.value.filter((n) => n.active).length,
     }
   })
 
@@ -574,6 +1006,9 @@ export const useMedkitStore = defineStore('medkit', () => {
   }
   function itemRequests(itemId: string): BorrowRequest[] {
     return requests.value.filter((r) => r.itemId === itemId).sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
+  }
+  function frozenItemsOfFeedback(fb: Feedback): Item[] {
+    return items.value.filter((i) => i.frozenByFeedbackId === fb.id || (fb.frozenItemIds?.includes(i.id) ?? false))
   }
 
   return {
@@ -584,6 +1019,8 @@ export const useMedkitStore = defineStore('medkit', () => {
     items,
     requests,
     feedbacks,
+    riskNotices,
+    notices,
     timeline,
     // getters
     currentUser,
@@ -596,6 +1033,9 @@ export const useMedkitStore = defineStore('medkit', () => {
     overduePickups,
     delayedDeliveries,
     stats,
+    myNotices,
+    unreadCount,
+    categoryInvestigations,
     // actions
     advanceHours,
     resetDemo,
@@ -622,5 +1062,12 @@ export const useMedkitStore = defineStore('medkit', () => {
     scrapItem,
     itemTimeline,
     itemRequests,
+    frozenItemsOfFeedback,
+    activeRiskNoticeFor,
+    investigationForCategory,
+    investigationForItem,
+    safeAlternativesForCategory,
+    markNoticeRead,
+    markAllNoticesRead,
   }
 })
